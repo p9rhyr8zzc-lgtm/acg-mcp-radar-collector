@@ -20,6 +20,8 @@ Only `schedule` and `workflow_dispatch` are enabled. The job requires a public r
 
 The job uses the standard GitHub-hosted `ubuntu-latest` runner, read-only contents permission, five-minute timeout and a single cancelable concurrency group. The sole external action is GitHub's official checkout, pinned to a full commit SHA with credential persistence disabled. Tests run before secret injection. The collector receives only its two settings and hosted-runner indicators in a cleared environment.
 
+Limited live mode fixes per-run ceilings at 25 Registry updates, 20 remote MCP attempts, 15 accepted servers, 50 new schema snapshots and 20 findings. Reaching a ceiling defers remaining work to a later scheduled run; these limits do not expand automatically.
+
 GitHub's [Actions billing documentation](https://docs.github.com/en/billing/concepts/product-billing/github-actions) states that standard GitHub-hosted runners in public repositories are free. Larger runners are billed separately and are not used here. No artifact upload, cache, Codespaces or paid Marketplace action is used. Logs and job summaries do not count as artifact storage. At four runs per day and the five-minute limit, the conservative 30-day maximum is 600 standard runner minutes, costing $0 under the public-repository rule. Private repository minute allowances are irrelevant to this design. See also GitHub's [secrets reference](https://docs.github.com/en/actions/reference/security/secrets) and [workflow syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax).
 
 ## Local verification

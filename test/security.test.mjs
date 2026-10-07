@@ -7,7 +7,7 @@ import { publicIP, safeURL, assertSchema, jsonText } from '../src/security.mjs';
 import { choosePublicAddress, NodePinnedTransport, pinnedOptions } from '../src/node-transport.mjs';
 import { remoteRequest, responseJSON } from '../src/transport.mjs';
 import { discover, structuralSchema, hash } from '../src/mcp.mjs';
-import { CAPS, REGISTRY } from '../src/types.mjs';
+import { CAPS, LIVE_CAPS, REGISTRY } from '../src/types.mjs';
 import { classify, initialSync, pollPage } from '../src/registry.mjs';
 import { signedHeaders, MockReceiver, INGEST_BYTES, ingestConfig } from '../src/sender.mjs';
 
@@ -151,6 +151,10 @@ test('ingest body cap and owner configuration fail closed', () => {
   assert.deepEqual(ingestConfig('', ''), { mode: 'mock' });
   assert.throws(() => ingestConfig(endpoint, secret), /invalid_ingest_configuration/);
   assert.throws(() => ingestConfig('', secret), /orphan_ingest_secret/);
+});
+test('limited-live caps are fixed and cannot auto-expand', () => {
+  assert.deepEqual(LIVE_CAPS, { registryUpdates: 25, remoteAttempts: 20, acceptedServers: 15, snapshots: 50, findings: 20 });
+  assert.equal(Object.isFrozen(LIVE_CAPS), true);
 });
 test('workflow hardens public default-branch execution and uses no paid storage', () => {
   const workflow = readFileSync(new URL('../.github/workflows/secure-collector.yml', import.meta.url), 'utf8');

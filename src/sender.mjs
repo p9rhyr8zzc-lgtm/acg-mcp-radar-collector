@@ -57,7 +57,7 @@ export function createSender(config, mockSecret) {
   const transport = config.mode === 'configured' ? new NodePinnedTransport(resolveAll, request, 'fixed', config.url) : undefined;
   let uploads = 0;
   return { mock, get uploads() { return uploads; }, async send(payload) {
-    if (++uploads > 80) fail('upload_limit');
+    if (++uploads > 100) fail('upload_limit');
     const body = JSON.stringify(payload), headers = signedHeaders(body, secret);
     if (mock) return mock.receive(body, headers);
     const response = await transport.request(config.url, { method: 'POST', body, headers });
