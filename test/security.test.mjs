@@ -59,14 +59,17 @@ test('rebinding fixture: socket pins first checked IP, later DNS is never used',
   const dns = async () => [{ address: ++resolutions === 1 ? '8.8.8.8' : privateAddresses[2], family: 4 }];
   const t = new NodePinnedTransport(dns, connectorFor({}, o => options = o));
   await t.request(endpoint, { method: 'POST', body: rpcBody });
-  assert.equal(resolutions, 1); assert.equal(options.hostname, '8.8.8.8'); assert.equal(options.lookup, undefined);
+  assert.equal(resolutions, 1); assert.equal(options.hostname, 'mcp.publicvendor.com'); assert.equal(typeof options.lookup, 'function');
+  await new Promise((resolve, reject) => options.lookup('mcp.publicvendor.com', {}, (error, address, family) => {
+    if (error) reject(error); else { assert.equal(address, '8.8.8.8'); assert.equal(family, 4); resolve(); }
+  }));
   assert.equal(options.servername, 'mcp.publicvendor.com'); assert.equal(options.headers.Host, 'mcp.publicvendor.com'); assert.equal(options.agent, false);
   await assert.rejects(t.request(endpoint, { method: 'POST', body: rpcBody }), /ssrf_dns_blocked/); assert.equal(resolutions, 2);
 });
 test('only an explicit bounded retry changes the fully validated public address', async () => {
   const chosen = [], logs = [];
   const addresses = [{ address: '8.8.8.8', family: 4 }, { address: '1.1.1.1', family: 4 }, { address: '2606:4700::1111', family: 6 }];
-  const t = new NodePinnedTransport(async () => addresses, connectorFor({}, options => chosen.push(options.hostname)), 'mcp', undefined,
+  const t = new NodePinnedTransport(async () => addresses, connectorFor({}, options => options.lookup(options.hostname, {}, (_error, address) => chosen.push(address))), 'mcp', undefined,
     event => transportDiagnostic(event, line => logs.push(line)));
   await t.request(endpoint, { method: 'POST', body: rpcBody });
   await t.request(endpoint, { method: 'POST', body: rpcBody });

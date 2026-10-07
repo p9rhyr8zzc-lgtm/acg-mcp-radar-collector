@@ -33,9 +33,11 @@ async function resolveAll(host) {
 function pinnedOptions(u, chosen, init) {
   const host = u.hostname.replace(/^\[|\]$/g, "");
   return {
-    hostname: chosen.address,
+    hostname: host,
     port: 443,
-    family: chosen.family,
+    lookup: (_hostname, options, callback) => options?.all
+      ? callback(null, [{ address: chosen.address, family: chosen.family }])
+      : callback(null, chosen.address, chosen.family),
     path: u.pathname + u.search,
     method: init.method,
     agent: false,
