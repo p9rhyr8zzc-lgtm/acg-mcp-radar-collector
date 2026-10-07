@@ -1,0 +1,39 @@
+name: Secure public MCP collector
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: acg-radar-collector
+  cancel-in-progress: true
+jobs:
+  collect:
+    # Until ingestion is configured, only an explicit dispatch runs the mock gate.
+    if: >-
+      github.event.repository.private == false &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'schedule' && vars.RADAR_INGEST_URL != ''))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Security fixtures
+        shell: bash
+        run: env -i PATH="$PATH" node --test test/*.test.mjs
+      - name: Read-only collection
+        shell: bash
+        env:
+          RADAR_INGEST_URL: ${{ vars.RADAR_INGEST_URL }}
+          RADAR_INGEST_SECRET: ${{ secrets.RADAR_INGEST_SECRET }}
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$RUNNER_OS" = Linux
+          env -i PATH="$PATH" GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RADAR_INGEST_URL="$RADAR_INGEST_URL" RADAR_INGEST_SECRET="$RADAR_INGEST_SECRET" node src/main.mjs

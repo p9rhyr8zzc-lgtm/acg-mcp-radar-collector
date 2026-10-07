@@ -1,0 +1,9 @@
+{
+  "name": "acg-mcp-radar-collector",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Secure read-only collector for public MCP tool schemas.",
+  "engines": { "node": ">=22" },
+  "scripts": { "test": "node --test test/*.test.mjs", "collect": "node src/main.mjs" }
+}
