@@ -13,19 +13,18 @@ export async function collect(config) {
   const deadline = setTimeout(() => { console.error('collector_run_timeout'); process.exit(1); }, 210000);
   const networkLog = event => transportDiagnostic(event);
   const sender = createSender(config, config.mode === 'mock' ? randomBytes(32).toString('hex') : undefined, networkLog);
-  const fixedRead = createFixedPinnedRequest(networkLog);
   const results = []; let registryProcessed = 0, schemas = 0, attempts = 0, metadataSkipped = 0, findings = 0;
   const budget = () => { if (Date.now() - started > 180000) throw new Error('run_budget_exceeded'); };
   async function retryRead(stage, fn) {
-    try { return await stageDiagnostic(stage, fn); }
-    catch { budget(); return stageDiagnostic(`${stage}_retry`, fn); }
+    try { return await stageDiagnostic(stage, () => fn(0)); }
+    catch { budget(); return stageDiagnostic(`${stage}_retry`, () => fn(1)); }
   }
   try {
     // State reads are idempotent, so one bounded retry may use the next
     // independently validated edge address. Writes are never blindly retried.
-    const prior = await retryRead('state_read', () => sender.send({ kind: 'state' }));
+    const prior = await retryRead('state_read', addressOffset => sender.send({ kind: 'state' }, addressOffset));
     // Manual mock gate verifies live Registry detail reads. Configured operation polls incrementally.
-    const page = config.mode === 'mock' ? { processed: 0, servers: [], sync: prior.sync } : await retryRead('registry_poll', () => pollPage(prior.sync, new Date().toISOString(), fixedRead));
+    const page = config.mode === 'mock' ? { processed: 0, servers: [], sync: prior.sync } : await retryRead('registry_poll', addressOffset => pollPage(prior.sync, new Date().toISOString(), createFixedPinnedRequest(networkLog, addressOffset)));
     registryProcessed = Math.min(page.processed, LIVE_CAPS.registryUpdates);
     for (const server of page.servers.slice(0, LIVE_CAPS.registryUpdates).filter(s => s.category === 'A' || prior.tracked[s.name]?.server.category === 'A')) await stageDiagnostic('ingest_registry', () => sender.send({ kind: 'registry', server }));
     await stageDiagnostic('ingest_sync', () => sender.send({ kind: 'sync', previous: prior.sync, sync: page.sync }));
@@ -34,7 +33,7 @@ export async function collect(config) {
     if (config.mode === 'mock' || !Object.keys(prior.tracked).length) {
       for (const name of SEEDS) {
         if (candidates.length >= LIVE_CAPS.acceptedServers) break;
-        budget(); const server = await retryRead('registry_lookup', () => lookup(name, fixedRead)); await stageDiagnostic('ingest_registry', () => sender.send({ kind: 'registry', server }));
+        budget(); const server = await retryRead('registry_lookup', addressOffset => lookup(name, createFixedPinnedRequest(networkLog, addressOffset))); await stageDiagnostic('ingest_registry', () => sender.send({ kind: 'registry', server }));
         if (config.mode === 'mock') registryProcessed++;
         if (server.status === 'active' && server.category === 'A') candidates.push(server);
         else metadataSkipped++;
@@ -48,9 +47,9 @@ export async function collect(config) {
     for (const server of candidates.slice(0, LIVE_CAPS.acceptedServers)) {
       if (findings >= LIVE_CAPS.findings || schemas >= LIVE_CAPS.snapshots) break;
       budget(); let found, error;
-      const mcpTransport = new NodePinnedTransport(undefined, undefined, 'mcp', undefined, networkLog);
       for (let retry = 0; retry < 2 && attempts < LIVE_CAPS.remoteAttempts; retry++) {
         attempts++;
+        const mcpTransport = new NodePinnedTransport(undefined, undefined, 'mcp', undefined, networkLog, undefined, retry);
         try { found = await stageDiagnostic('mcp_discovery', () => discover(server, mcpTransport, new Date().toISOString())); break; }
         catch (e) { error = safeError(e); if (!['dns_resolution_failed', 'network_or_validation_failure', 'response_timeout', 'connect_timeout', 'tls_timeout', 'upstream_http_failure'].includes(error)) break; budget(); }
       }

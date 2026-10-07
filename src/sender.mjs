@@ -56,11 +56,11 @@ export function createSender(config, mockSecret, diagnostic) {
   const mock = config.mode === 'mock' ? new MockReceiver(secret) : undefined;
   const transport = config.mode === 'configured' ? new NodePinnedTransport(resolveAll, request, 'fixed', config.url, diagnostic) : undefined;
   let uploads = 0;
-  return { mock, get uploads() { return uploads; }, async send(payload) {
+  return { mock, get uploads() { return uploads; }, async send(payload, addressOffset = 0) {
     if (++uploads > 100) fail('upload_limit');
     const body = JSON.stringify(payload), headers = signedHeaders(body, secret);
     if (mock) return mock.receive(body, headers);
-    const response = await transport.request(config.url, { method: 'POST', body, headers });
+    const response = await transport.request(config.url, { method: 'POST', body, headers }, addressOffset);
     if (response.status !== 200) fail('ingestion_rejected');
     return jsonText(response.text);
   } };

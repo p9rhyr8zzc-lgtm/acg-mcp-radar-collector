@@ -47,17 +47,17 @@ function pinnedOptions(u, chosen, init) {
   };
 }
 class NodePinnedTransport {
-  constructor(resolver = resolveAll, connector = request, mode = "mcp", ingestURL = void 0, diagnostic = () => {}, timers = {}) {
+  constructor(resolver = resolveAll, connector = request, mode = "mcp", ingestURL = void 0, diagnostic = () => {}, timers = {}, addressOffset = 0) {
     this.resolver = resolver;
     this.connector = connector;
     this.mode = mode;
     this.ingestURL = ingestURL;
     this.diagnostic = diagnostic;
     this.timers = { connectMs: 2000, tlsMs: 2000, responseMs: CAPS.timeoutMs, ...timers };
-    this.addressCursor = new Map();
+    this.addressOffset = addressOffset;
   }
   dnsPinned = true;
-  async request(raw, init) {
+  async request(raw, init, addressOffset = this.addressOffset) {
     let u;
     if (this.mode === "fixed") {
       u = new URL(raw);
@@ -81,10 +81,8 @@ class NodePinnedTransport {
     }
     const hostname = u.hostname.replace(/^\[|\]$/g, "");
     const addresses = publicAddresses(await this.resolver(hostname));
-    const cursor = this.addressCursor.get(hostname) ?? 0;
-    const index = cursor % addresses.length;
+    const index = addressOffset % addresses.length;
     const chosen = addresses[index];
-    this.addressCursor.set(hostname, cursor + 1);
     const category = this.ingestURL && u.href === this.ingestURL ? "radar_ingest" : u.origin === new URL(REGISTRY).origin ? "registry" : "mcp";
     this.diagnostic({ event: "address_selected", category, family: chosen.family, index, count: addresses.length });
     return await new Promise((resolve, reject) => {
@@ -167,8 +165,8 @@ async function fixedPinnedRequest(url, init) {
   if (response.status >= 300 && response.status <= 399) fail("fixed_origin_redirect_rejected");
   return response;
 }
-function createFixedPinnedRequest(diagnostic) {
-  const transport = new NodePinnedTransport(resolveAll, request, "fixed", undefined, diagnostic);
+function createFixedPinnedRequest(diagnostic, addressOffset = 0) {
+  const transport = new NodePinnedTransport(resolveAll, request, "fixed", undefined, diagnostic, undefined, addressOffset);
   return async (url, init) => {
     const response = await transport.request(url, init);
     if (response.status >= 300 && response.status <= 399) fail("fixed_origin_redirect_rejected");

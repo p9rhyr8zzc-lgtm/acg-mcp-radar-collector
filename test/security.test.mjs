@@ -63,15 +63,16 @@ test('rebinding fixture: socket pins first checked IP, later DNS is never used',
   assert.equal(options.servername, 'mcp.publicvendor.com'); assert.equal(options.headers.Host, 'mcp.publicvendor.com'); assert.equal(options.agent, false);
   await assert.rejects(t.request(endpoint, { method: 'POST', body: rpcBody }), /ssrf_dns_blocked/); assert.equal(resolutions, 2);
 });
-test('bounded retry rotates across fully validated public addresses without exposing an IP', async () => {
+test('only an explicit bounded retry changes the fully validated public address', async () => {
   const chosen = [], logs = [];
   const addresses = [{ address: '8.8.8.8', family: 4 }, { address: '1.1.1.1', family: 4 }, { address: '2606:4700::1111', family: 6 }];
   const t = new NodePinnedTransport(async () => addresses, connectorFor({}, options => chosen.push(options.hostname)), 'mcp', undefined,
     event => transportDiagnostic(event, line => logs.push(line)));
   await t.request(endpoint, { method: 'POST', body: rpcBody });
   await t.request(endpoint, { method: 'POST', body: rpcBody });
-  assert.deepEqual(chosen, ['8.8.8.8', '1.1.1.1']);
-  assert.deepEqual(logs, ['radar_transport:address_selected:mcp:ipv4:1/3', 'radar_transport:address_selected:mcp:ipv4:2/3']);
+  await t.request(endpoint, { method: 'POST', body: rpcBody }, 1);
+  assert.deepEqual(chosen, ['8.8.8.8', '8.8.8.8', '1.1.1.1']);
+  assert.deepEqual(logs, ['radar_transport:address_selected:mcp:ipv4:1/3', 'radar_transport:address_selected:mcp:ipv4:1/3', 'radar_transport:address_selected:mcp:ipv4:2/3']);
   assert.equal(logs.some(line => addresses.some(item => line.includes(item.address))), false);
 });
 
