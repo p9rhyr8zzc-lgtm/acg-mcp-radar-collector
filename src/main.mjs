@@ -15,7 +15,10 @@ export async function collect(config) {
   const budget = () => { if (Date.now() - started > 180000) throw new Error('run_budget_exceeded'); };
   async function retryRead(fn) { try { return await fn(); } catch (e) { budget(); return fn(); } }
   try {
-    const prior = await sender.send({ kind: 'state' });
+    // A newly-created Durable Object can take longer than an ordinary warm
+    // request. State reads are idempotent, so use the same single bounded
+    // retry already applied to Registry reads.
+    const prior = await retryRead(() => sender.send({ kind: 'state' }));
     // Manual mock gate verifies live Registry detail reads. Configured operation polls incrementally.
     const page = config.mode === 'mock' ? { processed: 0, servers: [], sync: prior.sync } : await retryRead(() => pollPage(prior.sync, new Date().toISOString()));
     registryProcessed = Math.min(page.processed, LIVE_CAPS.registryUpdates);
