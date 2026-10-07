@@ -51,10 +51,10 @@ export class MockReceiver {
     this.#nonces.add(nonce); return structuredClone(result);
   }
 }
-export function createSender(config, mockSecret) {
+export function createSender(config, mockSecret, diagnostic) {
   const secret = config.mode === 'mock' ? mockSecret : config.secret;
   const mock = config.mode === 'mock' ? new MockReceiver(secret) : undefined;
-  const transport = config.mode === 'configured' ? new NodePinnedTransport(resolveAll, request, 'fixed', config.url) : undefined;
+  const transport = config.mode === 'configured' ? new NodePinnedTransport(resolveAll, request, 'fixed', config.url, diagnostic) : undefined;
   let uploads = 0;
   return { mock, get uploads() { return uploads; }, async send(payload) {
     if (++uploads > 100) fail('upload_limit');

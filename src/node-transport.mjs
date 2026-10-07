@@ -4,9 +4,13 @@ import { isIP } from "node:net";
 import { checkServerIdentity } from "node:tls";
 import { CAPS, REGISTRY } from "./types.mjs";
 import { fail, publicIP, safeURL } from "./security.mjs";
-function choosePublicAddress(addresses) {
+function publicAddresses(addresses) {
   if (!addresses.length || addresses.some((a) => !publicIP(a.address) || isIP(a.address) !== a.family)) fail("ssrf_dns_blocked");
-  return addresses.find((a) => a.family === 4) ?? addresses[0];
+  return [...addresses.filter((a) => a.family === 4), ...addresses.filter((a) => a.family === 6)];
+}
+function choosePublicAddress(addresses, index = 0) {
+  const safe = publicAddresses(addresses);
+  return safe[index % safe.length];
 }
 async function resolveAll(host) {
   if (isIP(host)) return [{ address: host, family: isIP(host) }];
@@ -43,11 +47,14 @@ function pinnedOptions(u, chosen, init) {
   };
 }
 class NodePinnedTransport {
-  constructor(resolver = resolveAll, connector = request, mode = "mcp", ingestURL = void 0) {
+  constructor(resolver = resolveAll, connector = request, mode = "mcp", ingestURL = void 0, diagnostic = () => {}, timers = {}) {
     this.resolver = resolver;
     this.connector = connector;
     this.mode = mode;
     this.ingestURL = ingestURL;
+    this.diagnostic = diagnostic;
+    this.timers = { connectMs: 2000, tlsMs: 2000, responseMs: CAPS.timeoutMs, ...timers };
+    this.addressCursor = new Map();
   }
   dnsPinned = true;
   async request(raw, init) {
@@ -73,12 +80,18 @@ class NodePinnedTransport {
       for (const key of Object.keys(init.headers ?? {})) if (!["content-type", "accept", "mcp-protocol-version", "mcp-session-id"].includes(key.toLowerCase())) fail("unsafe_request_header");
     }
     const hostname = u.hostname.replace(/^\[|\]$/g, "");
-    const chosen = choosePublicAddress(await this.resolver(hostname));
+    const addresses = publicAddresses(await this.resolver(hostname));
+    const cursor = this.addressCursor.get(hostname) ?? 0;
+    const index = cursor % addresses.length;
+    const chosen = addresses[index];
+    this.addressCursor.set(hostname, cursor + 1);
+    const category = this.ingestURL && u.href === this.ingestURL ? "radar_ingest" : u.origin === new URL(REGISTRY).origin ? "registry" : "mcp";
+    this.diagnostic({ event: "address_selected", category, family: chosen.family, index, count: addresses.length });
     return await new Promise((resolve, reject) => {
       let settled = false;
       let connectTimer;
       let tlsTimer;
-      const overall = setTimeout(() => req.destroy(new Error("request_timeout")), CAPS.timeoutMs);
+      const overall = setTimeout(() => req.destroy(new Error("response_timeout")), this.timers.responseMs);
       const finish = (error, result) => {
         if (settled) return;
         settled = true;
@@ -136,10 +149,10 @@ class NodePinnedTransport {
         });
       });
       req.on("socket", (socket) => {
-        connectTimer = setTimeout(() => req.destroy(new Error("connect_timeout")), 2e3);
+        connectTimer = setTimeout(() => req.destroy(new Error("connect_timeout")), this.timers.connectMs);
         socket.once("connect", () => {
           clearTimeout(connectTimer);
-          tlsTimer = setTimeout(() => req.destroy(new Error("tls_timeout")), 2e3);
+          tlsTimer = setTimeout(() => req.destroy(new Error("tls_timeout")), this.timers.tlsMs);
         });
         socket.once("secureConnect", () => clearTimeout(tlsTimer));
       });
@@ -154,8 +167,17 @@ async function fixedPinnedRequest(url, init) {
   if (response.status >= 300 && response.status <= 399) fail("fixed_origin_redirect_rejected");
   return response;
 }
+function createFixedPinnedRequest(diagnostic) {
+  const transport = new NodePinnedTransport(resolveAll, request, "fixed", undefined, diagnostic);
+  return async (url, init) => {
+    const response = await transport.request(url, init);
+    if (response.status >= 300 && response.status <= 399) fail("fixed_origin_redirect_rejected");
+    return response;
+  };
+}
 export {
   NodePinnedTransport,
+  createFixedPinnedRequest,
   choosePublicAddress,
   fixedPinnedRequest,
   pinnedOptions,

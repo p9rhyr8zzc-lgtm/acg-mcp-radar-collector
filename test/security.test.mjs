@@ -10,6 +10,7 @@ import { discover, structuralSchema, hash } from '../src/mcp.mjs';
 import { CAPS, LIVE_CAPS, REGISTRY } from '../src/types.mjs';
 import { classify, initialSync, pollPage } from '../src/registry.mjs';
 import { signedHeaders, MockReceiver, INGEST_BYTES, ingestConfig } from '../src/sender.mjs';
+import { stageDiagnostic, transportDiagnostic } from '../src/diagnostics.mjs';
 
 const endpoint = 'https://mcp.publicvendor.com/mcp';
 const rpcBody = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} });
@@ -61,6 +62,62 @@ test('rebinding fixture: socket pins first checked IP, later DNS is never used',
   assert.equal(resolutions, 1); assert.equal(options.hostname, '8.8.8.8'); assert.equal(options.lookup, undefined);
   assert.equal(options.servername, 'mcp.publicvendor.com'); assert.equal(options.headers.Host, 'mcp.publicvendor.com'); assert.equal(options.agent, false);
   await assert.rejects(t.request(endpoint, { method: 'POST', body: rpcBody }), /ssrf_dns_blocked/); assert.equal(resolutions, 2);
+});
+test('bounded retry rotates across fully validated public addresses without exposing an IP', async () => {
+  const chosen = [], logs = [];
+  const addresses = [{ address: '8.8.8.8', family: 4 }, { address: '1.1.1.1', family: 4 }, { address: '2606:4700::1111', family: 6 }];
+  const t = new NodePinnedTransport(async () => addresses, connectorFor({}, options => chosen.push(options.hostname)), 'mcp', undefined,
+    event => transportDiagnostic(event, line => logs.push(line)));
+  await t.request(endpoint, { method: 'POST', body: rpcBody });
+  await t.request(endpoint, { method: 'POST', body: rpcBody });
+  assert.deepEqual(chosen, ['8.8.8.8', '1.1.1.1']);
+  assert.deepEqual(logs, ['radar_transport:address_selected:mcp:ipv4:1/3', 'radar_transport:address_selected:mcp:ipv4:2/3']);
+  assert.equal(logs.some(line => addresses.some(item => line.includes(item.address))), false);
+});
+
+function stalledConnector(stage) {
+  return (_options, _callback) => {
+    const req = new EventEmitter();
+    req.destroy = error => queueMicrotask(() => req.emit('error', error));
+    req.end = () => queueMicrotask(() => {
+      const socket = new EventEmitter();
+      req.emit('socket', socket);
+      if (stage !== 'connect') socket.emit('connect');
+      if (stage === 'response') socket.emit('secureConnect');
+    });
+    return req;
+  };
+}
+test('transport classifies connect, TLS and response timeouts independently', async () => {
+  const timers = { connectMs: 5, tlsMs: 5, responseMs: 15 };
+  for (const [stage, code] of [['connect', 'connect_timeout'], ['tls', 'tls_timeout'], ['response', 'response_timeout']]) {
+    const t = new NodePinnedTransport(async () => [{ address: '8.8.8.8', family: 4 }], stalledConnector(stage), 'mcp', undefined, undefined, timers);
+    await assert.rejects(t.request(endpoint, { method: 'POST', body: rpcBody }), new RegExp(code));
+  }
+});
+
+test('stage diagnostics emit bounded start and success timing', async () => {
+  const lines = []; const times = [100, 223];
+  assert.equal(await stageDiagnostic('state_read', async () => 'ok', line => lines.push(line), () => times.shift()), 'ok');
+  assert.deepEqual(lines, ['radar_stage_start:state_read', 'radar_stage_ok:state_read:123ms']);
+});
+for (const [label, stage, code] of [
+  ['state read timeout', 'state_read', 'response_timeout'],
+  ['Registry timeout', 'registry_poll', 'connect_timeout'],
+  ['MCP timeout', 'mcp_discovery', 'tls_timeout'],
+  ['ingest timeout', 'ingest_snapshot', 'response_timeout'],
+]) test(label + ' is classified in stage diagnostics', async () => {
+  const lines = []; const times = [10, 17];
+  await assert.rejects(stageDiagnostic(stage, async () => { throw new Error(code); }, line => lines.push(line), () => times.shift()), new RegExp(code));
+  assert.deepEqual(lines, [`radar_stage_start:${stage}`, `radar_stage_fail:${stage}:${code}:7ms`]);
+});
+test('diagnostic logs never include secrets, signatures, nonces, bodies or schemas', async () => {
+  const secret = 'sensitive-fixture-secret'; const lines = []; const times = [1, 2];
+  await assert.rejects(stageDiagnostic('ingest_snapshot', async () => { throw new Error(secret); }, line => lines.push(line), () => times.shift()));
+  const text = lines.join('\n') + readFileSync(new URL('../src/diagnostics.mjs', import.meta.url), 'utf8');
+  assert.equal(text.includes(secret), false);
+  assert.doesNotMatch(lines.join('\n'), /signature|nonce|request body|schema|authorization|telegram|wallet/i);
+  assert.match(lines[1], /network_or_validation_failure/);
 });
 test('TLS hostname mismatch blocked by actual pinned certificate callback', async () => {
   const t = new NodePinnedTransport(async () => [{ address: '8.8.8.8', family: 4 }], connectorFor({ failTLS: true }));

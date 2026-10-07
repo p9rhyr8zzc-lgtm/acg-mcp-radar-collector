@@ -2,34 +2,39 @@ import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { SEEDS, lookup, pollPage } from './registry.mjs';
 import { discover } from './mcp.mjs';
-import { NodePinnedTransport } from './node-transport.mjs';
+import { createFixedPinnedRequest, NodePinnedTransport } from './node-transport.mjs';
 import { createSender, ingestConfig } from './sender.mjs';
 import { LIVE_CAPS } from './types.mjs';
+import { stageDiagnostic, transportDiagnostic } from './diagnostics.mjs';
 
 const safeError = e => /^[a-z_]+$/.test(e?.message ?? '') ? e.message : 'network_or_validation_failure';
 export async function collect(config) {
   const started = Date.now();
   const deadline = setTimeout(() => { console.error('collector_run_timeout'); process.exit(1); }, 210000);
-  const sender = createSender(config, config.mode === 'mock' ? randomBytes(32).toString('hex') : undefined);
+  const networkLog = event => transportDiagnostic(event);
+  const sender = createSender(config, config.mode === 'mock' ? randomBytes(32).toString('hex') : undefined, networkLog);
+  const fixedRead = createFixedPinnedRequest(networkLog);
   const results = []; let registryProcessed = 0, schemas = 0, attempts = 0, metadataSkipped = 0, findings = 0;
   const budget = () => { if (Date.now() - started > 180000) throw new Error('run_budget_exceeded'); };
-  async function retryRead(fn) { try { return await fn(); } catch (e) { budget(); return fn(); } }
+  async function retryRead(stage, fn) {
+    try { return await stageDiagnostic(stage, fn); }
+    catch { budget(); return stageDiagnostic(`${stage}_retry`, fn); }
+  }
   try {
-    // A newly-created Durable Object can take longer than an ordinary warm
-    // request. State reads are idempotent, so use the same single bounded
-    // retry already applied to Registry reads.
-    const prior = await retryRead(() => sender.send({ kind: 'state' }));
+    // State reads are idempotent, so one bounded retry may use the next
+    // independently validated edge address. Writes are never blindly retried.
+    const prior = await retryRead('state_read', () => sender.send({ kind: 'state' }));
     // Manual mock gate verifies live Registry detail reads. Configured operation polls incrementally.
-    const page = config.mode === 'mock' ? { processed: 0, servers: [], sync: prior.sync } : await retryRead(() => pollPage(prior.sync, new Date().toISOString()));
+    const page = config.mode === 'mock' ? { processed: 0, servers: [], sync: prior.sync } : await retryRead('registry_poll', () => pollPage(prior.sync, new Date().toISOString(), fixedRead));
     registryProcessed = Math.min(page.processed, LIVE_CAPS.registryUpdates);
-    for (const server of page.servers.slice(0, LIVE_CAPS.registryUpdates).filter(s => s.category === 'A' || prior.tracked[s.name]?.server.category === 'A')) await sender.send({ kind: 'registry', server });
-    await sender.send({ kind: 'sync', previous: prior.sync, sync: page.sync });
+    for (const server of page.servers.slice(0, LIVE_CAPS.registryUpdates).filter(s => s.category === 'A' || prior.tracked[s.name]?.server.category === 'A')) await stageDiagnostic('ingest_registry', () => sender.send({ kind: 'registry', server }));
+    await stageDiagnostic('ingest_sync', () => sender.send({ kind: 'sync', previous: prior.sync, sync: page.sync }));
     // Only identifiers are seeded. Every endpoint is freshly obtained from the official Registry.
     const candidates = [];
     if (config.mode === 'mock' || !Object.keys(prior.tracked).length) {
       for (const name of SEEDS) {
         if (candidates.length >= LIVE_CAPS.acceptedServers) break;
-        budget(); const server = await retryRead(() => lookup(name)); await sender.send({ kind: 'registry', server });
+        budget(); const server = await retryRead('registry_lookup', () => lookup(name, fixedRead)); await stageDiagnostic('ingest_registry', () => sender.send({ kind: 'registry', server }));
         if (config.mode === 'mock') registryProcessed++;
         if (server.status === 'active' && server.category === 'A') candidates.push(server);
         else metadataSkipped++;
@@ -43,17 +48,18 @@ export async function collect(config) {
     for (const server of candidates.slice(0, LIVE_CAPS.acceptedServers)) {
       if (findings >= LIVE_CAPS.findings || schemas >= LIVE_CAPS.snapshots) break;
       budget(); let found, error;
+      const mcpTransport = new NodePinnedTransport(undefined, undefined, 'mcp', undefined, networkLog);
       for (let retry = 0; retry < 2 && attempts < LIVE_CAPS.remoteAttempts; retry++) {
         attempts++;
-        try { found = await discover(server, new NodePinnedTransport(), new Date().toISOString()); break; }
-        catch (e) { error = safeError(e); if (!['dns_resolution_failed', 'network_or_validation_failure', 'request_timeout', 'connect_timeout', 'tls_timeout', 'upstream_http_failure'].includes(error)) break; budget(); }
+        try { found = await stageDiagnostic('mcp_discovery', () => discover(server, mcpTransport, new Date().toISOString())); break; }
+        catch (e) { error = safeError(e); if (!['dns_resolution_failed', 'network_or_validation_failure', 'response_timeout', 'connect_timeout', 'tls_timeout', 'upstream_http_failure'].includes(error)) break; budget(); }
       }
       if (found?.length) {
         if (schemas + found.length > LIVE_CAPS.snapshots) { results.push({ server: server.name, result: 'DEFERRED_SNAPSHOT_CAP', schemas: 0 }); break; }
         let outcome = 'NO_CHANGE', uploaded = 0;
-        for (const s of found) { const received = await sender.send({ kind: 'snapshot', snapshot: { serverId: s.server, registryVersion: s.version,
+        for (const s of found) { const received = await stageDiagnostic('ingest_snapshot', () => sender.send({ kind: 'snapshot', snapshot: { serverId: s.server, registryVersion: s.version,
           canonicalOrigin: new URL(s.endpoint).origin, toolName: s.tool, inputSchema: s.schema, schemaHash: s.hash,
-          registryUpdatedAt: s.registryUpdatedAt, collectedAt: s.fetchedAt, sourceType: 'official_registry_mcp' } });
+          registryUpdatedAt: s.registryUpdatedAt, collectedAt: s.fetchedAt, sourceType: 'official_registry_mcp' } }));
           outcome = received.outcome ?? (received.noOp ? 'NO_CHANGE' : outcome); uploaded++; schemas++;
           if (['HIGH_CONFIDENCE_BREAKING', 'POTENTIAL_BREAKING', 'NON_BREAKING'].includes(received.outcome)) findings++;
           if (findings >= LIVE_CAPS.findings) break;
@@ -61,7 +67,7 @@ export async function collect(config) {
         results.push({ server: server.name, result: outcome, schemas: uploaded });
       } else {
         const result = error === 'authentication_required' ? 'SKIP_AUTH_REQUIRED' : found ? 'EMPTY_TOOLS' : 'NEEDS_REVIEW';
-        await sender.send({ kind: 'attempt', serverId: server.name, collectedAt: new Date().toISOString(), result });
+        await stageDiagnostic('ingest_attempt', () => sender.send({ kind: 'attempt', serverId: server.name, collectedAt: new Date().toISOString(), result }));
         results.push({ server: server.name, result, reason: error ?? 'empty_tools', schemas: 0 });
       }
     }
